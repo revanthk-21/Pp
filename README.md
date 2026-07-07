@@ -1,76 +1,34 @@
-import numpy as np
 import pandas as pd
-from statsmodels.tsa.stattools import adfuller, kpss
+import numpy as np
+import statsmodels.api as sm
 
-def stationarity_tests(series, name=None, verbose=True):
+def get_clean_residual(df, date_col, dv_col, gfc_start='2008-09-01', gfc_end='2009-06-30'):
     """
-    Run ADF (3 specifications) and KPSS (2 specifications) on a series
-    and print a results table.
-
-    Parameters
-    ----------
-    series : pd.Series or array-like
-    name : str, optional — label for output (defaults to series.name)
-    verbose : bool, default True — print formatted table
-
-    Returns
-    -------
-    pd.DataFrame with columns: Variable, Test Name, Test Statistic, p-value, Conclusion
+    Regresses out (1) a GFC shock dummy and (2) quarterly seasonal dummies
+    from the DV, returning the residual for stationarity testing.
     """
-    s = pd.Series(series).dropna()
-    if name is None:
-        name = s.name if s.name is not None else "series"
+    data = df[[date_col, dv_col]].copy().dropna()
+    data[date_col] = pd.to_datetime(data[date_col])
 
-    rows = []
+    # 1. GFC dummy
+    data['gfc_dummy'] = ((data[date_col] >= gfc_start) & (data[date_col] <= gfc_end)).astype(int)
 
-    adf_specs = [
-        ("ADF: No deterministic terms", "n"),
-        ("ADF: Constant", "c"),
-        ("ADF: Constant and linear trend", "ct"),
-    ]
-    for label, reg in adf_specs:
-        try:
-            stat, pval, *_ = adfuller(s, regression=reg, autolag="AIC")
-            conclusion = "Stationary" if pval < 0.05 else "Non-Stationary"
-        except Exception as e:
-            stat, pval, conclusion = np.nan, np.nan, f"Error: {e}"
-        rows.append([name, label, stat, pval, conclusion])
+    # 2. Quarter dummies (Q1 as baseline, so include Q2/Q3/Q4)
+    data['quarter'] = data[date_col].dt.quarter
+    quarter_dummies = pd.get_dummies(data['quarter'], prefix='Q', drop_first=True).astype(int)
 
-    kpss_specs = [
-        ("KPSS: Constant", "c"),
-        ("KPSS: Constant and linear trend", "ct"),
-    ]
-    for label, reg in kpss_specs:
-        try:
-            stat, pval, *_ = kpss(s, regression=reg, nlags="auto")
-            # KPSS null = stationary -> low p-value means NON-stationary
-            conclusion = "Stationary" if pval >= 0.05 else "Non-Stationary"
-        except Exception as e:
-            stat, pval, conclusion = np.nan, np.nan, f"Error: {e}"
-        rows.append([name, label, stat, pval, conclusion])
+    X = pd.concat([data['gfc_dummy'], quarter_dummies], axis=1)
+    X = sm.add_constant(X)
+    y = data[dv_col]
 
-    results = pd.DataFrame(
-        rows, columns=["Variable", "Test Name", "Test Statistic", "p-value", "Conclusion"]
-    )
+    model = sm.OLS(y, X, missing='drop').fit()
+    print(model.summary())
 
-    if verbose:
-        print(f"\nStationarity Tests: {name}\n")
-        display_df = results.copy()
-        display_df["Test Statistic"] = display_df["Test Statistic"].map(
-            lambda x: f"{x:.4f}" if pd.notnull(x) else "NA"
-        )
-        display_df["p-value"] = display_df["p-value"].map(
-            lambda x: f"{x:.4f}" if pd.notnull(x) else "NA"
-        )
-        try:
-            from IPython.display import display
-            display(display_df)
-        except Exception:
-            print(display_df.to_string(index=False))
+    residual = pd.Series(model.resid, index=data.index, name=f"{dv_col}_resid")
+    return residual, model
 
-    return results
-# raw DV
-stationarity_tests(df['deriv_notl_co_industry_dln'])
+# Usage:
+resid, model = get_clean_residual(df, date_col='date', dv_col='deriv_notl_co_industry_dln')
 
-# on your GFC-excluded / deseasonalized residual
-stationarity_tests(resid, name='deriv_notl_co_industry_dln (deseasonalized, ex-GFC)')
+# then test it:
+stationarity_tests(resid, name='deriv_notl_co_industry_dln (GFC + seasonal removed)')
